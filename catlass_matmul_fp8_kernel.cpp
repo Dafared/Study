@@ -91,27 +91,33 @@ extern "C" __global__ __aicore__ void catlass_fp8w8a16_matmul_bfloat16_t(GM_ADDR
     using PrologueB = Gemm::Tile::TileCastFp8ToBf16WithScaleDequant<ArchTag, PrologueSrcType, PrologueDstType,
                                                                     PrologueScaleType, computeLen>;
 
-    using TileCopy = Gemm::Tile::TileCopyWithPrologue<ArchTag, AType, BType, CType, PrologueA, PrologueB>;
-    using BlockMmadOpt =
-        Gemm::Block::BlockMmad<DispatchPolicy, L1TileShape, L0TileShape, AType, BType, CType, void, TileCopy>;
+    // ========== One-stage 专用 (m <= 128): 带Prologue的BlockMmad ==========
+    using TileCopyWithPrologue = Gemm::Tile::TileCopyWithPrologue<ArchTag, AType, BType, CType, PrologueA, PrologueB>;
+    using BlockMmadWithPrologue =
+        Gemm::Block::BlockMmad<DispatchPolicy, L1TileShape, L0TileShape, AType, BType, CType, void, TileCopyWithPrologue>;
     using BlockEpilogue = void;
+
+    // ========== Two-stage 专用 (m > 128): 标准BlockMmad + 独立DequantTile ==========
+    using TileCopySimple = Gemm::Tile::TileCopy<ArchTag, AType, BType, CType>;
+    using BlockMmadSimple =
+        Gemm::Block::BlockMmad<Gemm::MmadAtlasA2Pingpong<ENABLE_UNIT_FLAG>, L1TileShape, L0TileShape, AType, BType, CType, void, TileCopySimple>;
 
     if (m > M_THRESHOLD) {
         if (m > n) {
             using BlockScheduler = typename Gemm::Block::GemmIdentityBlockSwizzle<3, 0>;
-            using MatmulKernel = Gemm::Kernel::FP8W8A16MatmulTwoStage<BlockMmadOpt, BlockEpilogue, BlockScheduler, PrologueB>;
+            using MatmulKernel = Gemm::Kernel::FP8W8A16MatmulTwoStage<BlockMmadSimple, BlockEpilogue, BlockScheduler, PrologueB>;
             typename MatmulKernel::Params params_{
                 problemShape,    deviceA,     layoutA,   deviceB,
-                layoutPrologueB, deviceC,     layoutC,   {{}, {deqScalar, deqZeroPoint}, {}},
+                layoutPrologueB, deviceC,     layoutC,   {},
                 deviceScale,     layoutScale, groupSize, deviceWorkspace};
             MatmulKernel matmul_kernel;
             matmul_kernel(params_);
         } else {
             using BlockScheduler = typename Gemm::Block::GemmIdentityBlockSwizzle<3, 1>;
-            using MatmulKernel = Gemm::Kernel::FP8W8A16MatmulTwoStage<BlockMmadOpt, BlockEpilogue, BlockScheduler, PrologueB>;
+            using MatmulKernel = Gemm::Kernel::FP8W8A16MatmulTwoStage<BlockMmadSimple, BlockEpilogue, BlockScheduler, PrologueB>;
             typename MatmulKernel::Params params_{
                 problemShape,    deviceA,     layoutA,   deviceB,
-                layoutPrologueB, deviceC,     layoutC,   {{}, {deqScalar, deqZeroPoint}, {}},
+                layoutPrologueB, deviceC,     layoutC,   {},
                 deviceScale,     layoutScale, groupSize, deviceWorkspace};
             MatmulKernel matmul_kernel;
             matmul_kernel(params_);
@@ -119,7 +125,7 @@ extern "C" __global__ __aicore__ void catlass_fp8w8a16_matmul_bfloat16_t(GM_ADDR
     } else {
         if (m > n) {
             using BlockScheduler = typename Gemm::Block::GemmIdentityBlockSwizzle<3, 0>;
-            using MatmulKernel = Gemm::Kernel::FP8W8A16Matmul<BlockMmadOpt, BlockEpilogue, BlockScheduler>;
+            using MatmulKernel = Gemm::Kernel::FP8W8A16Matmul<BlockMmadWithPrologue, BlockEpilogue, BlockScheduler>;
             typename MatmulKernel::Params params_{
                 problemShape,    deviceA,     layoutA,   deviceB,
                 layoutPrologueB, deviceC,     layoutC,   {{}, {deqScalar, deqZeroPoint}, {}},
@@ -128,7 +134,7 @@ extern "C" __global__ __aicore__ void catlass_fp8w8a16_matmul_bfloat16_t(GM_ADDR
             matmul_kernel(params_);
         } else {
             using BlockScheduler = typename Gemm::Block::GemmIdentityBlockSwizzle<3, 1>;
-            using MatmulKernel = Gemm::Kernel::FP8W8A16Matmul<BlockMmadOpt, BlockEpilogue, BlockScheduler>;
+            using MatmulKernel = Gemm::Kernel::FP8W8A16Matmul<BlockMmadWithPrologue, BlockEpilogue, BlockScheduler>;
             typename MatmulKernel::Params params_{
                 problemShape,    deviceA,     layoutA,   deviceB,
                 layoutPrologueB, deviceC,     layoutC,   {{}, {deqScalar, deqZeroPoint}, {}},
