@@ -243,14 +243,14 @@ public:
                     MatrixCoord gmTileAOffset{0, kLoopIdxNext * L1TileShape::K};
                     auto gmTileA = gmA[params.layoutA.GetOffset(offsetCoord.GetCoordMK()) + params.layoutA.GetOffset(gmTileAOffset)];
                     auto layoutTileA = params.layoutA.GetTileLayout(MakeCoord(actualBlockShape.m(), kActualNext));
-                    AscendC::DataCopy(l1ATensor, gmTileA, layoutTileA.Count());
+                    AscendC::DataCopy(l1ATensor, gmTileA, actualBlockShape.m() * kActualNext);
                     AscendC::SetFlag<AscendC::HardEvent::MTE2_MTE1>(l1AEventList[l1ListIdNext]);
 
                     AscendC::WaitFlag<AscendC::HardEvent::MTE1_MTE2>(l1BEventList[l1ListIdNext]);
                     MatrixCoord gmTileBOffset{kLoopIdxNext * L1TileShape::K, blockIdxCoord.n() * L1TileShape::N};
                     auto gmTileB = gmDequantB[layoutFullB.GetOffset(gmTileBOffset)];
                     auto layoutTileB = layoutFullB.GetTileLayout(MakeCoord(kActualNext, actualBlockShape.n()));
-                    AscendC::DataCopy(l1BTensor, gmTileB, layoutTileB.Count());
+                    AscendC::DataCopy(l1BTensor, gmTileB, kActualNext * actualBlockShape.n());
                     AscendC::SetFlag<AscendC::HardEvent::MTE2_MTE1>(l1BEventList[l1ListIdNext]);
                 }
 
@@ -276,7 +276,7 @@ public:
                         if ((mPartIdx == 0) && (kPartIdx == 0)) {
                             AscendC::WaitFlag<AscendC::HardEvent::MTE2_MTE1>(l1AEventList[l1ListId]);
                         }
-                        AscendC::DataCopy(l0ATile, l1ATile, layoutAInL0.Count());
+                        AscendC::DataCopy(l0ATile, l1ATile, mPartActual * kPartActual);
                         if ((mPartIdx == mPartLoop - 1) && (kPartIdx == kPartLoop - 1)) {
                             AscendC::SetFlag<AscendC::HardEvent::MTE1_MTE2>(l1AEventList[l1ListId]);
                         }
@@ -293,7 +293,7 @@ public:
                             if ((kPartIdx == 0) && (nPartIdx == 0)) {
                                 AscendC::WaitFlag<AscendC::HardEvent::MTE2_MTE1>(l1BEventList[l1ListId]);
                             }
-                            AscendC::DataCopy(l0BTile, l1BTile, layoutBInL0.Count());
+                            AscendC::DataCopy(l0BTile, l1BTile, kPartActual * nPartActual);
                             if ((kPartIdx == kPartLoop - 1) && (nPartIdx == nPartLoop - 1)) {
                                 AscendC::SetFlag<AscendC::HardEvent::MTE1_MTE2>(l1BEventList[l1ListId]);
                             }
@@ -315,7 +315,7 @@ public:
                                 }
                             }
 
-                            AscendC::MMad<ElementAccumulator, ElementA, ElementB>(
+                            AscendC::Mmad<ElementAccumulator, ElementA, ElementB>(
                                 l0CTile, l0ATile, l0BTile, mPartActual, nPartActual, kPartActual, initC, unitFlag);
 
                             AscendC::SetFlag<AscendC::HardEvent::M_MTE1>(l0BEventList[l0BListId]);
@@ -331,7 +331,7 @@ public:
             LayoutC layoutBlock = params.layoutC.GetTileLayout(actualBlockShape.GetCoordMN());
             AscendC::WaitFlag<AscendC::HardEvent::FIX_M>(EVENT_ID0);
             auto gmBlockC = gmC[params.layoutC.GetOffset(offsetCoord.GetCoordMN())];
-            AscendC::DataCopy(gmBlockC, l0CTensor, layoutBlock.Count());
+            AscendC::DataCopy(gmBlockC, l0CTensor, actualBlockShape.m() * actualBlockShape.n());
             AscendC::SetFlag<AscendC::HardEvent::FIX_M>(EVENT_ID0);
         }
 
@@ -422,7 +422,7 @@ public:
             auto layoutBlockScale = params.layoutScale.GetTileLayout(scaleTileShape);
 
             dequantTile(gmBlockDequantB, layoutBlockDequantB, gmBlockPrologueB, layoutBlockPrologueB,
-                        gmBlockScale, layoutBlockScale, groupSize, kOffset);
+                        gmBlockScale, layoutBlockScale, kOffset);
         }
 
         Catlass::Arch::CrossCoreSetFlag<0x2, PIPE_MTE3>(flagDequantFinish);
