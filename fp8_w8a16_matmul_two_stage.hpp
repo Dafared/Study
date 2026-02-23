@@ -243,14 +243,36 @@ public:
                     MatrixCoord gmTileAOffset{0, kLoopIdxNext * L1TileShape::K};
                     auto gmTileA = gmA[params.layoutA.GetOffset(offsetCoord.GetCoordMK()) + params.layoutA.GetOffset(gmTileAOffset)];
                     auto layoutTileA = params.layoutA.GetTileLayout(MakeCoord(actualBlockShape.m(), kActualNext));
-                    AscendC::DataCopy(l1ATensor, gmTileA, actualBlockShape.m() * kActualNext);
+                    {
+                        constexpr uint32_t ELE_NUM_PER_C0 = BYTE_PER_C0 / sizeof(ElementA);
+                        AscendC::Nd2NzParams intriParams;
+                        intriParams.ndNum = 1;
+                        intriParams.nValue = actualBlockShape.m();
+                        intriParams.dValue = kActualNext;
+                        intriParams.srcDValue = params.layoutA.stride(0);
+                        intriParams.dstNzNStride = layoutAInL1.stride(0) / ELE_NUM_PER_C0;
+                        intriParams.dstNzC0Stride = layoutAInL1.stride(3) / ELE_NUM_PER_C0;
+                        intriParams.dstNzMatrixStride = 0;
+                        AscendC::DataCopy(l1ATensor, gmTileA, intriParams);
+                    }
                     AscendC::SetFlag<AscendC::HardEvent::MTE2_MTE1>(l1AEventList[l1ListIdNext]);
 
                     AscendC::WaitFlag<AscendC::HardEvent::MTE1_MTE2>(l1BEventList[l1ListIdNext]);
                     MatrixCoord gmTileBOffset{kLoopIdxNext * L1TileShape::K, blockIdxCoord.n() * L1TileShape::N};
                     auto gmTileB = gmDequantB[layoutFullB.GetOffset(gmTileBOffset)];
                     auto layoutTileB = layoutFullB.GetTileLayout(MakeCoord(kActualNext, actualBlockShape.n()));
-                    AscendC::DataCopy(l1BTensor, gmTileB, kActualNext * actualBlockShape.n());
+                    {
+                        constexpr uint32_t ELE_NUM_PER_C0 = BYTE_PER_C0 / sizeof(ElementB);
+                        AscendC::Nd2NzParams intriParams;
+                        intriParams.ndNum = 1;
+                        intriParams.nValue = kActualNext;
+                        intriParams.dValue = actualBlockShape.n();
+                        intriParams.srcDValue = layoutFullB.stride(0);
+                        intriParams.dstNzNStride = layoutBInL1.stride(0) / ELE_NUM_PER_C0;
+                        intriParams.dstNzC0Stride = layoutBInL1.stride(3) / ELE_NUM_PER_C0;
+                        intriParams.dstNzMatrixStride = 0;
+                        AscendC::DataCopy(l1BTensor, gmTileB, intriParams);
+                    }
                     AscendC::SetFlag<AscendC::HardEvent::MTE2_MTE1>(l1BEventList[l1ListIdNext]);
                 }
 
@@ -410,15 +432,13 @@ public:
             uint32_t scaleTileRows = scaleRowEnd - scaleRowStart + 1;
             uint32_t scaleTileCols = scaleColEnd - scaleColStart + 1;
 
-            uint32_t scaleGroupNumk = CeilDiv(kAct, groupSize);
-            uint32_t scaleGroupNumN = CeilDiv(nAct, groupSize);
             uint32_t scaleStride = params.layoutScale.stride(0);
 
             MatrixCoord offsetScaleCoord{scaleRowStart, scaleColStart};
             MatrixCoord scaleTileShape{scaleTileRows, scaleTileCols};
 
             auto gmBlockScale = gmScaleFull[params.layoutScale.GetOffset(offsetScaleCoord)];
-            dequantTile.loadAllTileScales(scaleGroupNumk, scaleGroupNumN, scaleStride, gmBlockScale);
+            dequantTile.loadAllTileScales(scaleTileRows, scaleTileCols, scaleStride, gmBlockScale);
             AscendC::PipeBarrier<PIPE_ALL>();
 
             MatrixCoord offsetCoordB{kOffset, nOffset};
@@ -433,7 +453,7 @@ public:
             auto layoutBlockScale = params.layoutScale.GetTileLayout(scaleTileShape);
 
             dequantTile(gmBlockDequantB, layoutBlockDequantB, gmBlockPrologueB, layoutBlockPrologueB,
-                        layoutBlockScale, groupSize, kOffset);
+                        layoutBlockScale, groupSize, kOffset, true);
         }
 
         Catlass::Arch::CrossCoreSetFlag<0x2, PIPE_MTE3>(flagDequantFinish);
