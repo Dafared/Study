@@ -298,7 +298,21 @@ public:
                         if ((mPartIdx == 0) && (kPartIdx == 0)) {
                             AscendC::WaitFlag<AscendC::HardEvent::MTE2_MTE1>(l1AEventList[l1ListId]);
                         }
-                        AscendC::DataCopy(l0ATile, l1ATile, mPartActual * kPartActual);
+                        {
+                            constexpr uint32_t ELE_NUM_PER_C0 = BYTE_PER_C0 / sizeof(ElementA);
+                            AscendC::Nd2NdParams intriParams;
+                            intriParams.ndNum = 1;
+                            intriParams.srcN = mPartActual;
+                            intriParams.srcD = kPartActual;
+                            intriParams.dstN = mPartActual;
+                            intriParams.dstD = kPartActual;
+                            intriParams.srcStride0 = layoutAInL1.stride(0) / ELE_NUM_PER_C0;
+                            intriParams.srcStride1 = layoutAInL1.stride(3) / ELE_NUM_PER_C0;
+                            intriParams.dstStride0 = layoutAInL0.stride(0) / ELE_NUM_PER_C0;
+                            intriParams.dstStride1 = layoutAInL0.stride(3) / ELE_NUM_PER_C0;
+                            AscendC::DataCopyParams params(intriParams);
+                            AscendC::DataCopy(l0ATile, l1ATile, params);
+                        }
                         if ((mPartIdx == mPartLoop - 1) && (kPartIdx == kPartLoop - 1)) {
                             AscendC::SetFlag<AscendC::HardEvent::MTE1_MTE2>(l1AEventList[l1ListId]);
                         }
@@ -315,7 +329,21 @@ public:
                             if ((kPartIdx == 0) && (nPartIdx == 0)) {
                                 AscendC::WaitFlag<AscendC::HardEvent::MTE2_MTE1>(l1BEventList[l1ListId]);
                             }
-                            AscendC::DataCopy(l0BTile, l1BTile, kPartActual * nPartActual);
+                            {
+                                constexpr uint32_t ELE_NUM_PER_C0 = BYTE_PER_C0 / sizeof(ElementB);
+                                AscendC::Nd2NdParams intriParams;
+                                intriParams.ndNum = 1;
+                                intriParams.srcN = kPartActual;
+                                intriParams.srcD = nPartActual;
+                                intriParams.dstN = kPartActual;
+                                intriParams.dstD = nPartActual;
+                                intriParams.srcStride0 = layoutBInL1.stride(0) / ELE_NUM_PER_C0;
+                                intriParams.srcStride1 = layoutBInL1.stride(3) / ELE_NUM_PER_C0;
+                                intriParams.dstStride0 = layoutBInL0.stride(0) / ELE_NUM_PER_C0;
+                                intriParams.dstStride1 = layoutBInL0.stride(3) / ELE_NUM_PER_C0;
+                                AscendC::DataCopyParams params(intriParams);
+                                AscendC::DataCopy(l0BTile, l1BTile, params);
+                            }
                             if ((kPartIdx == kPartLoop - 1) && (nPartIdx == nPartLoop - 1)) {
                                 AscendC::SetFlag<AscendC::HardEvent::MTE1_MTE2>(l1BEventList[l1ListId]);
                             }
