@@ -30,26 +30,25 @@ public:
     using BlockMmad = BlockMmad_;
     using ArchTag = typename BlockMmad::ArchTag;
     using ElementA = typename BlockMmad::ElementA;
-    using ElementPrologueB = typename BlockMmad::PrologueB::ElementSrc;
     using ElementB = typename BlockMmad::ElementB;
     using LayoutA = typename BlockMmad::LayoutA;
-    using LayoutPrologueB = typename BlockMmad::PrologueB::LayoutSrc;
     using LayoutB = typename BlockMmad::LayoutB;
-
-    using ElementScale = typename BlockMmad::PrologueB::ElementScale;
-    using LayoutScale = typename BlockMmad::PrologueB::LayoutScale;
 
     using L1TileShape = typename BlockMmad::L1TileShape;
     using L0TileShape = typename BlockMmad::L0TileShape;
     using ElementC = typename BlockMmad::ElementC;
     using LayoutC = typename BlockMmad::LayoutC;
 
-    using MmadParams = typename BlockMmad::Params;
     using DequantTile = DequantTile_;
 
     using BlockScheduler = BlockScheduler_;
 
     using ElementAccumulator = typename BlockMmad::ElementAccumulator;
+
+    using ElementPrologueB = typename DequantTile::ElementSrc;
+    using LayoutPrologueB = typename DequantTile::LayoutSrc;
+    using ElementScale = typename DequantTile::ElementScale;
+    using LayoutScale = typename DequantTile::LayoutScale;
 
     struct Params {
         GemmCoord problemShape;
@@ -60,7 +59,7 @@ public:
         GM_ADDR ptrC;
         LayoutC layoutC;
 
-        MmadParams mmadParams;
+        typename DequantTile::Params dequantParams;
 
         GM_ADDR ptrPerGroupScale;
         LayoutScale layoutScale;
@@ -74,8 +73,8 @@ public:
         CATLASS_HOST_DEVICE
         Params(GemmCoord const &problemShape_, GM_ADDR ptrA_, LayoutA const &layoutA_, GM_ADDR ptrPrologueB_,
                LayoutPrologueB const &layoutPrologueB_, GM_ADDR ptrC_, LayoutC const &layoutC_,
-               MmadParams const &mmadParams_, GM_ADDR ptrPerGroupScale_, LayoutScale layoutScale_, uint32_t groupSize_,
-               GM_ADDR ptrWorkspace_)
+               typename DequantTile::Params const &dequantParams_, GM_ADDR ptrPerGroupScale_, 
+               LayoutScale layoutScale_, uint32_t groupSize_, GM_ADDR ptrWorkspace_)
             : problemShape(problemShape_),
               ptrA(ptrA_),
               layoutA(layoutA_),
@@ -83,7 +82,7 @@ public:
               layoutPrologueB(layoutPrologueB_),
               ptrC(ptrC_),
               layoutC(layoutC_),
-              mmadParams(mmadParams_),
+              dequantParams(dequantParams_),
               ptrPerGroupScale(ptrPerGroupScale_),
               layoutScale(layoutScale_),
               groupSize(groupSize_),
@@ -123,7 +122,7 @@ public:
     {
         Params params{
             args.problemShape,    args.deviceA,     args.layoutA,   args.devicePrologueB,
-            args.layoutPrologueB, args.deviceC,     args.layoutC,   {{}, {args.deqScalar, args.deqZeroPoint}, {}},
+            args.layoutPrologueB, args.deviceC,     args.layoutC,   {args.deqScalar, args.deqZeroPoint},
             args.deviceScale,     args.layoutScale, args.groupSize, workspace};
         return params;
     }
@@ -137,9 +136,6 @@ public:
     template <>
     CATLASS_DEVICE void operator()<AscendC::AIC>(Params const &params)
     {
-        auto aicoreNum = AscendC::GetBlockNum();
-        auto aicoreIdx = AscendC::GetBlockIdx();
-
         Catlass::Arch::CrossCoreWaitFlag(flagDequantFinish);
         Catlass::Arch::CrossCoreBarrier<0x0, PIPE_MTE1>();
 
@@ -156,254 +152,27 @@ public:
         AscendC::GlobalTensor<ElementC> gmC;
         gmC.SetGlobalBuffer(reinterpret_cast<__gm__ ElementC *>(params.ptrC));
 
-        constexpr uint32_t STAGES = 2;
-        constexpr uint32_t L1A_SIZE = L1TileShape::M * L1TileShape::K * sizeof(ElementA);
-        constexpr uint32_t L1B_SIZE = L1TileShape::N * L1TileShape::K * sizeof(ElementB);
-        constexpr uint32_t L0A_PINGPONG_BUF_SIZE = ArchTag::L0A_SIZE / STAGES;
-        constexpr uint32_t L0B_PINGPONG_BUF_SIZE = ArchTag::L0B_SIZE / STAGES;
-
-        AscendC::LocalTensor<ElementA> l1ATensorList[STAGES];
-        AscendC::LocalTensor<ElementB> l1BTensorList[STAGES];
-        AscendC::LocalTensor<ElementA> l0ATensorList[STAGES];
-        AscendC::LocalTensor<ElementB> l0BTensorList[STAGES];
-        AscendC::LocalTensor<ElementAccumulator> l0CTensor;
-
-        int32_t l1AEventList[STAGES];
-        int32_t l1BEventList[STAGES];
-        int32_t l0AEventList[STAGES];
-        int32_t l0BEventList[STAGES];
-
-        uint32_t l1AOffset = 0;
-        uint32_t l1BOffset = L1A_SIZE * STAGES;
-
-        for (uint32_t i = 0; i < STAGES; i++) {
-            l1ATensorList[i] = resource.l1Buf.template GetBufferByByte<ElementA>(l1AOffset + L1A_SIZE * i);
-            l1BTensorList[i] = resource.l1Buf.template GetBufferByByte<ElementB>(l1BOffset + L1B_SIZE * i);
-            l0ATensorList[i] = resource.l0ABuf.template GetBufferByByte<ElementA>(L0A_PINGPONG_BUF_SIZE * i);
-            l0BTensorList[i] = resource.l0BBuf.template GetBufferByByte<ElementB>(L0B_PINGPONG_BUF_SIZE * i);
-
-            l1AEventList[i] = i;
-            l1BEventList[i] = i + STAGES;
-            l0AEventList[i] = i;
-            l0BEventList[i] = i + STAGES;
-
-            AscendC::SetFlag<AscendC::HardEvent::MTE1_MTE2>(l1AEventList[i]);
-            AscendC::SetFlag<AscendC::HardEvent::MTE1_MTE2>(l1BEventList[i]);
-            AscendC::SetFlag<AscendC::HardEvent::M_MTE1>(l0AEventList[i]);
-            AscendC::SetFlag<AscendC::HardEvent::M_MTE1>(l0BEventList[i]);
-        }
-        l0CTensor = resource.l0CBuf.template GetBufferByByte<ElementAccumulator>(0);
-        AscendC::SetFlag<AscendC::HardEvent::FIX_M>(EVENT_ID0);
-
-        using L1AAlignHelper = Gemm::helper::L1AlignHelper<ElementA, LayoutA>;
-        using L1BAlignHelper = Gemm::helper::L1AlignHelper<ElementB, LayoutB>;
-        using LayoutAInL1 = layout::zN;
-        using LayoutBInL1 = layout::zN;
-        using LayoutAInL0 = layout::zZ;
-        using LayoutBInL0 = layout::zN;
-        using LayoutCInL0 = layout::zN;
-
-        auto layoutAInL1 = LayoutAInL1::template MakeLayout<ElementA>(L1TileShape::M, L1TileShape::K);
-        auto layoutBInL1 = LayoutBInL1::template MakeLayout<ElementB>(L1TileShape::K, L1TileShape::N);
-
         LayoutB layoutFullB{params.problemShape.k(), params.problemShape.n()};
 
-        uint32_t l1ListId = 0;
-        uint32_t l0AListId = 0;
-        uint32_t l0BListId = 0;
+        BlockMmad blockMmad(resource);
 
         for (uint32_t loopIdx = AscendC::GetBlockIdx(); loopIdx < coreLoops; loopIdx += AscendC::GetBlockNum()) {
             auto blockIdxCoord = matmulBlockScheduler.GetBlockCoord(loopIdx);
             auto actualBlockShape = matmulBlockScheduler.GetActualBlockShape(blockIdxCoord);
             GemmCoord offsetCoord = blockIdxCoord * blockShape;
 
-            uint32_t mRound = RoundUp<L1AAlignHelper::M_ALIGNED>(actualBlockShape.m());
-            uint32_t nRound = RoundUp<L1BAlignHelper::N_ALIGNED>(actualBlockShape.n());
+            auto gmBlockA = gmA[params.layoutA.GetOffset(offsetCoord.GetCoordMK())];
+            auto layoutBlockA = params.layoutA.GetTileLayout(actualBlockShape.GetCoordMK());
 
-            auto layoutInL0C = LayoutCInL0::MakeLayoutInL0C(MakeCoord(mRound, nRound));
+            MatrixCoord offsetB{0, blockIdxCoord.n() * L1TileShape::N};
+            auto gmBlockB = gmDequantB[layoutFullB.GetOffset(offsetB)];
+            auto layoutBlockB = layoutFullB.GetTileLayout(MatrixCoord{actualBlockShape.k(), actualBlockShape.n()});
 
-            uint32_t kTileCount = CeilDiv<L1TileShape::K>(actualBlockShape.k());
-
-            for (uint32_t kLoopIdx = 0; kLoopIdx < kTileCount; kLoopIdx++) {
-                uint32_t kActual = (kLoopIdx == kTileCount - 1) ? 
-                    (actualBlockShape.k() - kLoopIdx * L1TileShape::K) : L1TileShape::K;
-
-                uint32_t l1ListIdNext = (l1ListId + 1 < STAGES) ? (l1ListId + 1) : 0;
-                uint32_t kActualNext = 0;
-
-                if (kLoopIdx < kTileCount - 1) {
-                    uint32_t kLoopIdxNext = kLoopIdx + 1;
-                    kActualNext = (kLoopIdxNext < kTileCount - 1) ? L1TileShape::K
-                                                                  : (actualBlockShape.k() - kLoopIdxNext * L1TileShape::K);
-
-                    auto l1ATensor = l1ATensorList[l1ListIdNext];
-                    auto l1BTensor = l1BTensorList[l1ListIdNext];
-
-                    AscendC::WaitFlag<AscendC::HardEvent::MTE1_MTE2>(l1AEventList[l1ListIdNext]);
-                    MatrixCoord gmTileAOffset{0, kLoopIdxNext * L1TileShape::K};
-                    auto gmTileA = gmA[params.layoutA.GetOffset(offsetCoord.GetCoordMK()) + params.layoutA.GetOffset(gmTileAOffset)];
-                    auto layoutTileA = params.layoutA.GetTileLayout(MakeCoord(actualBlockShape.m(), kActualNext));
-                    {
-                        constexpr uint32_t ELE_NUM_PER_C0 = BYTE_PER_C0 / sizeof(ElementA);
-                        AscendC::Nd2NzParams intriParams;
-                        intriParams.ndNum = 1;
-                        intriParams.nValue = actualBlockShape.m();
-                        intriParams.dValue = kActualNext;
-                        intriParams.srcDValue = params.layoutA.stride(0);
-                        intriParams.dstNzNStride = layoutAInL1.stride(0) / ELE_NUM_PER_C0;
-                        intriParams.dstNzC0Stride = layoutAInL1.stride(3) / ELE_NUM_PER_C0;
-                        intriParams.dstNzMatrixStride = 0;
-                        AscendC::DataCopy(l1ATensor, gmTileA, intriParams);
-                    }
-                    AscendC::SetFlag<AscendC::HardEvent::MTE2_MTE1>(l1AEventList[l1ListIdNext]);
-
-                    AscendC::WaitFlag<AscendC::HardEvent::MTE1_MTE2>(l1BEventList[l1ListIdNext]);
-                    MatrixCoord gmTileBOffset{kLoopIdxNext * L1TileShape::K, blockIdxCoord.n() * L1TileShape::N};
-                    auto gmTileB = gmDequantB[layoutFullB.GetOffset(gmTileBOffset)];
-                    auto layoutTileB = layoutFullB.GetTileLayout(MakeCoord(kActualNext, actualBlockShape.n()));
-                    {
-                        constexpr uint32_t ELE_NUM_PER_C0 = BYTE_PER_C0 / sizeof(ElementB);
-                        AscendC::Nd2NzParams intriParams;
-                        intriParams.ndNum = 1;
-                        intriParams.nValue = kActualNext;
-                        intriParams.dValue = actualBlockShape.n();
-                        intriParams.srcDValue = layoutFullB.stride(0);
-                        intriParams.dstNzNStride = layoutBInL1.stride(0) / ELE_NUM_PER_C0;
-                        intriParams.dstNzC0Stride = layoutBInL1.stride(3) / ELE_NUM_PER_C0;
-                        intriParams.dstNzMatrixStride = 0;
-                        AscendC::DataCopy(l1BTensor, gmTileB, intriParams);
-                    }
-                    AscendC::SetFlag<AscendC::HardEvent::MTE2_MTE1>(l1BEventList[l1ListIdNext]);
-                }
-
-                auto l1ATensor = l1ATensorList[l1ListId];
-                auto l1BTensor = l1BTensorList[l1ListId];
-
-                uint32_t mPartLoop = CeilDiv<L0TileShape::M>(mRound);
-                uint32_t nPartLoop = CeilDiv<L0TileShape::N>(nRound);
-                uint32_t kPartLoop = CeilDiv<L0TileShape::K>(kActual);
-
-                for (uint32_t mPartIdx = 0; mPartIdx < mPartLoop; mPartIdx++) {
-                    uint32_t mPartActual = (mPartIdx < mPartLoop - 1) ? L0TileShape::M : (mRound - mPartIdx * L0TileShape::M);
-
-                    for (uint32_t kPartIdx = 0; kPartIdx < kPartLoop; kPartIdx++) {
-                        uint32_t kPartActual = (kPartIdx < kPartLoop - 1) ? L0TileShape::K : (kActual - kPartIdx * L0TileShape::K);
-
-                        auto l0ATile = l0ATensorList[l0AListId];
-                        LayoutAInL0 layoutAInL0 = LayoutAInL0::template MakeLayout<ElementA>(mPartActual, kPartActual);
-                        MatrixCoord l1AOffsetCoord{mPartIdx * L0TileShape::M, kPartIdx * L0TileShape::K};
-                        auto l1ATile = l1ATensor[layoutAInL1.GetOffset(l1AOffsetCoord)];
-
-                        AscendC::WaitFlag<AscendC::HardEvent::M_MTE1>(l0AEventList[l0AListId]);
-                        if ((mPartIdx == 0) && (kPartIdx == 0)) {
-                            AscendC::WaitFlag<AscendC::HardEvent::MTE2_MTE1>(l1AEventList[l1ListId]);
-                        }
-                        {
-                            constexpr uint32_t ELE_NUM_PER_FRACTAL = BYTE_PER_FRACTAL / sizeof(ElementA);
-                            AscendC::LoadData2DParams loadDataParams;
-                            loadDataParams.startIndex = 0;
-                            loadDataParams.repeatTimes = static_cast<uint16_t>(layoutAInL0.shape(3));
-                            loadDataParams.srcStride = layoutAInL1.stride(3) / ELE_NUM_PER_FRACTAL;
-                            loadDataParams.sid = 0;
-                            loadDataParams.dstGap = layoutAInL0.stride(3) / ELE_NUM_PER_FRACTAL - 1;
-                            loadDataParams.ifTranspose = false;
-                            loadDataParams.addrMode = 0;
-                            for (uint32_t i = 0; i < layoutAInL0.shape(1); i++) {
-                                AscendC::LoadData(l0ATile[i * layoutAInL0.stride(1)], 
-                                                  l1ATile[i * layoutAInL1.stride(1)], 
-                                                  loadDataParams);
-                            }
-                        }
-                        if ((mPartIdx == mPartLoop - 1) && (kPartIdx == kPartLoop - 1)) {
-                            AscendC::SetFlag<AscendC::HardEvent::MTE1_MTE2>(l1AEventList[l1ListId]);
-                        }
-
-                        for (uint32_t nPartIdx = 0; nPartIdx < nPartLoop; nPartIdx++) {
-                            uint32_t nPartActual = (nPartIdx < nPartLoop - 1) ? L0TileShape::N : (nRound - nPartIdx * L0TileShape::N);
-
-                            auto l0BTile = l0BTensorList[l0BListId];
-                            LayoutBInL0 layoutBInL0 = LayoutBInL0::template MakeLayout<ElementB>(kPartActual, nPartActual);
-                            MatrixCoord l1BOffsetCoord{kPartIdx * L0TileShape::K, nPartIdx * L0TileShape::N};
-                            auto l1BTile = l1BTensor[layoutBInL1.GetOffset(l1BOffsetCoord)];
-
-                            AscendC::WaitFlag<AscendC::HardEvent::M_MTE1>(l0BEventList[l0BListId]);
-                            if ((kPartIdx == 0) && (nPartIdx == 0)) {
-                                AscendC::WaitFlag<AscendC::HardEvent::MTE2_MTE1>(l1BEventList[l1ListId]);
-                            }
-                            {
-                                constexpr uint32_t ELE_NUM_PER_FRACTAL = BYTE_PER_FRACTAL / sizeof(ElementB);
-                                AscendC::LoadData2DParams loadDataParams;
-                                loadDataParams.startIndex = 0;
-                                loadDataParams.repeatTimes = static_cast<uint16_t>(layoutBInL0.shape(3));
-                                loadDataParams.srcStride = layoutBInL1.stride(3) / ELE_NUM_PER_FRACTAL;
-                                loadDataParams.sid = 0;
-                                loadDataParams.dstGap = layoutBInL0.stride(3) / ELE_NUM_PER_FRACTAL - 1;
-                                loadDataParams.ifTranspose = false;
-                                loadDataParams.addrMode = 0;
-                                for (uint32_t i = 0; i < layoutBInL0.shape(1); i++) {
-                                    AscendC::LoadData(l0BTile[i * layoutBInL0.stride(1)], 
-                                                      l1BTile[i * layoutBInL1.stride(1)], 
-                                                      loadDataParams);
-                                }
-                            }
-                            if ((kPartIdx == kPartLoop - 1) && (nPartIdx == nPartLoop - 1)) {
-                                AscendC::SetFlag<AscendC::HardEvent::MTE1_MTE2>(l1BEventList[l1ListId]);
-                            }
-                            AscendC::SetFlag<AscendC::HardEvent::MTE1_M>(EVENT_ID0);
-
-                            MatrixCoord l0COffset{mPartIdx * L0TileShape::M, nPartIdx * L0TileShape::N};
-                            auto l0CTile = l0CTensor[layoutInL0C.GetOffset(l0COffset)];
-
-                            AscendC::WaitFlag<AscendC::HardEvent::MTE1_M>(EVENT_ID0);
-
-                            bool initC = ((kLoopIdx == 0) && (kPartIdx == 0));
-                            uint8_t unitFlag = 0b00;
-                            if constexpr (BlockMmad::ENABLE_UNIT_FLAG) {
-                                if ((kLoopIdx == kTileCount - 1) && (mPartIdx == mPartLoop - 1) &&
-                                    (kPartIdx == kPartLoop - 1) && (nPartIdx == nPartLoop - 1)) {
-                                    unitFlag = 0b11;
-                                } else {
-                                    unitFlag = 0b10;
-                                }
-                            }
-
-                            AscendC::MmadParams mmadParams;
-                            mmadParams.m = mPartActual;
-                            mmadParams.n = nPartActual;
-                            mmadParams.k = kPartActual;
-                            mmadParams.unitFlag = unitFlag;
-                            mmadParams.cmatrixInitVal = initC;
-                            AscendC::Mmad(l0CTile, l0ATile, l0BTile, mmadParams);
-
-                            AscendC::SetFlag<AscendC::HardEvent::M_MTE1>(l0BEventList[l0BListId]);
-                            l0BListId = (l0BListId + 1 < STAGES) ? (l0BListId + 1) : 0;
-                        }
-                        AscendC::SetFlag<AscendC::HardEvent::M_MTE1>(l0AEventList[l0AListId]);
-                        l0AListId = (l0AListId + 1 < STAGES) ? (l0AListId + 1) : 0;
-                    }
-                }
-                l1ListId = l1ListIdNext;
-            }
-
-            LayoutC layoutBlock = params.layoutC.GetTileLayout(actualBlockShape.GetCoordMN());
-            AscendC::WaitFlag<AscendC::HardEvent::FIX_M>(EVENT_ID0);
             auto gmBlockC = gmC[params.layoutC.GetOffset(offsetCoord.GetCoordMN())];
-            AscendC::FixpipeParamsV220 fixpipeParams;
-            fixpipeParams.nSize = layoutBlock.shape(1);
-            fixpipeParams.mSize = layoutBlock.shape(0);
-            fixpipeParams.srcStride = layoutBlock.stride(3) / layoutBlock.stride(0);
-            fixpipeParams.dstStride = layoutBlock.stride(0);
-            AscendC::Fixpipe<ElementC, ElementAccumulator, AscendC::CFG_ROW_MAJOR>(gmBlockC, l0CTensor, fixpipeParams);
-            AscendC::SetFlag<AscendC::HardEvent::FIX_M>(EVENT_ID0);
-        }
+            auto layoutBlockC = params.layoutC.GetTileLayout(actualBlockShape.GetCoordMN());
 
-        for (uint32_t i = 0; i < STAGES; i++) {
-            AscendC::WaitFlag<AscendC::HardEvent::MTE1_MTE2>(l1AEventList[i]);
-            AscendC::WaitFlag<AscendC::HardEvent::MTE1_MTE2>(l1BEventList[i]);
-            AscendC::WaitFlag<AscendC::HardEvent::M_MTE1>(l0AEventList[i]);
-            AscendC::WaitFlag<AscendC::HardEvent::M_MTE1>(l0BEventList[i]);
+            blockMmad(gmBlockA, layoutBlockA, gmBlockB, layoutBlockB, gmBlockC, layoutBlockC, actualBlockShape);
         }
-        AscendC::WaitFlag<AscendC::HardEvent::FIX_M>(EVENT_ID0);
 
         AscendC::PipeBarrier<PIPE_ALL>();
     }
@@ -414,7 +183,7 @@ public:
         uint32_t totalAicoreNum = AscendC::GetBlockNum();
         uint32_t aicoreIdx = AscendC::GetBlockIdx() / AscendC::GetSubBlockNum();
 
-        DequantTile dequantTile(resource, params.mmadParams.prologueB);
+        DequantTile dequantTile(resource, params.dequantParams);
 
         AscendC::GlobalTensor<ElementPrologueB> gmPrologueB;
         gmPrologueB.SetGlobalBuffer(reinterpret_cast<__gm__ ElementPrologueB *>(params.ptrPrologueB));
