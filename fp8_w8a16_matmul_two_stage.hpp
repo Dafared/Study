@@ -299,19 +299,20 @@ public:
                             AscendC::WaitFlag<AscendC::HardEvent::MTE2_MTE1>(l1AEventList[l1ListId]);
                         }
                         {
-                            constexpr uint32_t ELE_NUM_PER_C0 = BYTE_PER_C0 / sizeof(ElementA);
-                            AscendC::Nd2NdParams intriParams;
-                            intriParams.ndNum = 1;
-                            intriParams.srcN = mPartActual;
-                            intriParams.srcD = kPartActual;
-                            intriParams.dstN = mPartActual;
-                            intriParams.dstD = kPartActual;
-                            intriParams.srcStride0 = layoutAInL1.stride(0) / ELE_NUM_PER_C0;
-                            intriParams.srcStride1 = layoutAInL1.stride(3) / ELE_NUM_PER_C0;
-                            intriParams.dstStride0 = layoutAInL0.stride(0) / ELE_NUM_PER_C0;
-                            intriParams.dstStride1 = layoutAInL0.stride(3) / ELE_NUM_PER_C0;
-                            AscendC::DataCopyParams params(intriParams);
-                            AscendC::DataCopy(l0ATile, l1ATile, params);
+                            constexpr uint32_t ELE_NUM_PER_FRACTAL = BYTE_PER_FRACTAL / sizeof(ElementA);
+                            AscendC::LoadData2DParams loadDataParams;
+                            loadDataParams.startIndex = 0;
+                            loadDataParams.repeatTimes = static_cast<uint16_t>(layoutAInL0.shape(3));
+                            loadDataParams.srcStride = layoutAInL1.stride(3) / ELE_NUM_PER_FRACTAL;
+                            loadDataParams.sid = 0;
+                            loadDataParams.dstGap = layoutAInL0.stride(3) / ELE_NUM_PER_FRACTAL - 1;
+                            loadDataParams.ifTranspose = false;
+                            loadDataParams.addrMode = 0;
+                            for (uint32_t i = 0; i < layoutAInL0.shape(1); i++) {
+                                AscendC::LoadData(l0ATile[i * layoutAInL0.stride(1)], 
+                                                  l1ATile[i * layoutAInL1.stride(1)], 
+                                                  loadDataParams);
+                            }
                         }
                         if ((mPartIdx == mPartLoop - 1) && (kPartIdx == kPartLoop - 1)) {
                             AscendC::SetFlag<AscendC::HardEvent::MTE1_MTE2>(l1AEventList[l1ListId]);
@@ -330,19 +331,20 @@ public:
                                 AscendC::WaitFlag<AscendC::HardEvent::MTE2_MTE1>(l1BEventList[l1ListId]);
                             }
                             {
-                                constexpr uint32_t ELE_NUM_PER_C0 = BYTE_PER_C0 / sizeof(ElementB);
-                                AscendC::Nd2NdParams intriParams;
-                                intriParams.ndNum = 1;
-                                intriParams.srcN = kPartActual;
-                                intriParams.srcD = nPartActual;
-                                intriParams.dstN = kPartActual;
-                                intriParams.dstD = nPartActual;
-                                intriParams.srcStride0 = layoutBInL1.stride(0) / ELE_NUM_PER_C0;
-                                intriParams.srcStride1 = layoutBInL1.stride(3) / ELE_NUM_PER_C0;
-                                intriParams.dstStride0 = layoutBInL0.stride(0) / ELE_NUM_PER_C0;
-                                intriParams.dstStride1 = layoutBInL0.stride(3) / ELE_NUM_PER_C0;
-                                AscendC::DataCopyParams params(intriParams);
-                                AscendC::DataCopy(l0BTile, l1BTile, params);
+                                constexpr uint32_t ELE_NUM_PER_FRACTAL = BYTE_PER_FRACTAL / sizeof(ElementB);
+                                AscendC::LoadData2DParams loadDataParams;
+                                loadDataParams.startIndex = 0;
+                                loadDataParams.repeatTimes = static_cast<uint16_t>(layoutBInL0.shape(3));
+                                loadDataParams.srcStride = layoutBInL1.stride(3) / ELE_NUM_PER_FRACTAL;
+                                loadDataParams.sid = 0;
+                                loadDataParams.dstGap = layoutBInL0.stride(3) / ELE_NUM_PER_FRACTAL - 1;
+                                loadDataParams.ifTranspose = false;
+                                loadDataParams.addrMode = 0;
+                                for (uint32_t i = 0; i < layoutBInL0.shape(1); i++) {
+                                    AscendC::LoadData(l0BTile[i * layoutBInL0.stride(1)], 
+                                                      l1BTile[i * layoutBInL1.stride(1)], 
+                                                      loadDataParams);
+                                }
                             }
                             if ((kPartIdx == kPartLoop - 1) && (nPartIdx == nPartLoop - 1)) {
                                 AscendC::SetFlag<AscendC::HardEvent::MTE1_MTE2>(l1BEventList[l1ListId]);
