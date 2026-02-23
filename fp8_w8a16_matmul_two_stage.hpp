@@ -315,8 +315,13 @@ public:
                                 }
                             }
 
-                            AscendC::Mmad<ElementAccumulator, ElementA, ElementB>(
-                                l0CTile, l0ATile, l0BTile, mPartActual, nPartActual, kPartActual, initC, unitFlag);
+                            AscendC::MmadParams mmadParams;
+                            mmadParams.m = mPartActual;
+                            mmadParams.n = nPartActual;
+                            mmadParams.k = kPartActual;
+                            mmadParams.unitFlag = unitFlag;
+                            mmadParams.cmatrixInitVal = initC;
+                            AscendC::Mmad(l0CTile, l0ATile, l0BTile, mmadParams);
 
                             AscendC::SetFlag<AscendC::HardEvent::M_MTE1>(l0BEventList[l0BListId]);
                             l0BListId = (l0BListId + 1 < STAGES) ? (l0BListId + 1) : 0;
@@ -331,7 +336,12 @@ public:
             LayoutC layoutBlock = params.layoutC.GetTileLayout(actualBlockShape.GetCoordMN());
             AscendC::WaitFlag<AscendC::HardEvent::FIX_M>(EVENT_ID0);
             auto gmBlockC = gmC[params.layoutC.GetOffset(offsetCoord.GetCoordMN())];
-            AscendC::DataCopy(gmBlockC, l0CTensor, actualBlockShape.m() * actualBlockShape.n());
+            AscendC::FixpipeParamsV220 fixpipeParams;
+            fixpipeParams.nSize = layoutBlock.shape(1);
+            fixpipeParams.mSize = layoutBlock.shape(0);
+            fixpipeParams.srcStride = layoutBlock.stride(3) / layoutBlock.stride(0);
+            fixpipeParams.dstStride = layoutBlock.stride(0);
+            AscendC::Fixpipe<ElementC, ElementAccumulator, AscendC::CFG_ROW_MAJOR>(gmBlockC, l0CTensor, fixpipeParams);
             AscendC::SetFlag<AscendC::HardEvent::FIX_M>(EVENT_ID0);
         }
 
@@ -380,12 +390,6 @@ public:
             dequantProblemShape, dequantTileMN, SWIZZLE_OFFSET, swizzleDirection);
         uint32_t dequantLoops = dequantBlockScheduler.GetCoreLoops();
 
-        uint32_t scaleGroupNumk = CeilDiv(kTotal, groupSize);
-        uint32_t scaleGroupNumN = CeilDiv(nTotal, groupSize);
-        uint32_t scaleStride = params.layoutScale.stride(0);
-        dequantTile.loadAllTileScales(scaleGroupNumk, scaleGroupNumN, scaleStride, gmScaleFull);
-        AscendC::PipeBarrier<PIPE_ALL>();
-
         for (uint32_t loopIdx = aicoreIdx; loopIdx < dequantLoops; loopIdx += totalAicoreNum) {
             auto blockIdxCoord = dequantBlockScheduler.GetBlockCoord(loopIdx);
             
@@ -406,8 +410,16 @@ public:
             uint32_t scaleTileRows = scaleRowEnd - scaleRowStart + 1;
             uint32_t scaleTileCols = scaleColEnd - scaleColStart + 1;
 
+            uint32_t scaleGroupNumk = CeilDiv(kAct, groupSize);
+            uint32_t scaleGroupNumN = CeilDiv(nAct, groupSize);
+            uint32_t scaleStride = params.layoutScale.stride(0);
+
             MatrixCoord offsetScaleCoord{scaleRowStart, scaleColStart};
             MatrixCoord scaleTileShape{scaleTileRows, scaleTileCols};
+
+            auto gmBlockScale = gmScaleFull[params.layoutScale.GetOffset(offsetScaleCoord)];
+            dequantTile.loadAllTileScales(scaleGroupNumk, scaleGroupNumN, scaleStride, gmBlockScale);
+            AscendC::PipeBarrier<PIPE_ALL>();
 
             MatrixCoord offsetCoordB{kOffset, nOffset};
             MatrixCoord actualTileShapeB{kAct, nAct};
@@ -418,11 +430,10 @@ public:
             auto gmBlockDequantB = gmDequantB[layoutFullB.GetOffset(offsetCoordB)];
             auto layoutBlockDequantB = layoutFullB.GetTileLayout(actualTileShapeB);
 
-            auto gmBlockScale = gmScaleFull[params.layoutScale.GetOffset(offsetScaleCoord)];
             auto layoutBlockScale = params.layoutScale.GetTileLayout(scaleTileShape);
 
             dequantTile(gmBlockDequantB, layoutBlockDequantB, gmBlockPrologueB, layoutBlockPrologueB,
-                        gmBlockScale, layoutBlockScale, kOffset);
+                        layoutBlockScale, groupSize, kOffset);
         }
 
         Catlass::Arch::CrossCoreSetFlag<0x2, PIPE_MTE3>(flagDequantFinish);
