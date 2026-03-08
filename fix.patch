@@ -1,0 +1,131 @@
+diff --git a/python/sglang/srt/hardware_backend/npu/quantization/linear_method_npu.py b/python/sglang/srt/hardware_backend/npu/quantization/linear_method_npu.py
+index 1234567..abcdefg 100644
+--- a/python/sglang/srt/hardware_backend/npu/quantization/linear_method_npu.py
++++ b/python/sglang/srt/hardware_backend/npu/quantization/linear_method_npu.py
+@@ -46,6 +46,37 @@ class NPUW8A8Int8LinearMethod(_NPULinearMethodBase):
+         layer: torch.nn.Module,
+         x: torch.Tensor,
+         bias: Optional[torch.Tensor] = None,
+     ) -> torch.Tensor:
+         from sglang.srt.layers.linear import RowParallelLinear
+ 
+         original_dtype = x.dtype
++        
++        # Check if we're in speculative decoding hidden states capture phase
++        use_high_precision = False
++        if hasattr(layer, 'forward_batch') and layer.forward_batch is not None:
++            from sglang.srt.model_executor.forward_batch_info import CaptureHiddenMode
++            if layer.forward_batch.capture_hidden_mode == CaptureHiddenMode.FULL:
++                use_high_precision = True
++        
++        if use_high_precision:
++            # Use high precision (BF16) for hidden states capture phase
++            return self._forward_high_precision(layer, x, bias, original_dtype)
++        
++        # Original W8A8 quantization logic
+         if original_dtype != torch.int8:
+             x = torch.ops.npu.npu_quantize(
+                 x,
+@@ -76,6 +107,24 @@ class NPUW8A8Int8LinearMethod(_NPULinearMethodBase):
+             output_dtype=original_dtype,
+         )
+ 
++    def _forward_high_precision(
++        self,
++        layer: torch.nn.Module,
++        x: torch.Tensor,
++        bias: Optional[torch.Tensor],
++        original_dtype: torch.dtype,
++    ) -> torch.Tensor:
++        """High precision forward for hidden states capture phase"""
++        # Use BF16 weights for computation
++        if not hasattr(layer, 'weight_bf16'):
++            layer.weight_bf16 = layer.weight.to(torch.bfloat16)
++        
++        # BF16 computation
++        x_bf16 = x.to(torch.bfloat16)
++        output = torch.nn.functional.linear(x_bf16, layer.weight_bf16, bias)
++        return output.to(original_dtype)
++
+ 
+ class NPUW8A8Int8DynamicLinearMethod(_NPULinearMethodBase):
+ 
+diff --git a/python/sglang/srt/layers/linear.py b/python/sglang/srt/layers/linear.py
+index 1234567..abcdefg 100644
+--- a/python/sglang/srt/layers/linear.py
++++ b/python/sglang/srt/layers/linear.py
+@@ -141,6 +141,8 @@ class LinearBase(torch.nn.Module):
+         """Base linear layer.
+ 
+     Args:
+         input_size: input dimension of the linear layer.
+         output_size: output dimension of the linear layer.
+         bias: If true, add bias.
+         skip_bias_add: If true, skip adding bias but instead return it.
+         params_dtype: Data type for the parameters.
+         quant_config: Quantization configure.
+     """
+ 
+     def __init__(
+@@ -162,6 +164,9 @@ class LinearBase(torch.nn.Module):
+             self.quant_method: Optional[QuantizeMethodBase] = UnquantizedLinearMethod()
+         else:
+             self.quant_method = quant_config.get_quant_method(self, prefix=prefix)
+ 
++        # Used to store forward_batch info for speculative decoding
++        self.forward_batch = None
++
+     def forward(self, x: torch.Tensor) -> torch.Tensor:
+         raise NotImplementedError
+ 
+diff --git a/python/sglang/srt/model_executor/model_runner.py b/python/sglang/srt/model_executor/model_runner.py
+index 1234567..abcdefg 100644
+--- a/python/sglang/srt/model_executor/model_runner.py
++++ b/python/sglang/srt/model_executor/model_runner.py
+@@ -2035,6 +2035,12 @@ class ModelRunner:
+         spec_info = get_spec_info()
+         if capture_hidden_mode != CaptureHiddenMode.FULL:
+             capture_hidden_mode = (
+                 spec_info.capture_hidden_mode if spec_info else CaptureHiddenMode.NULL
+             )
+ 
++        # Set forward_batch to all Linear layers for speculative decoding
++        if self.server_args.speculative_algorithm and \
++           self.server_args.speculative_algorithm.startswith("eagle"):
++            self._set_forward_batch_to_layers(forward_batch)
++
+         if self.server_args.enable_lora:
+             lora_ids = [None] * batch_size
+         else:
+@@ -2114,6 +2120,10 @@ class ModelRunner:
+         torch.get_device_module(self.device).synchronize()
+         self.tp_group.barrier()
+         with torch.inference_mode(), run_ctx or empty_context():
+             run_once()
++        
++        # Clear forward_batch from all Linear layers after forward
++        if self.server_args.speculative_algorithm and \
++           self.server_args.speculative_algorithm.startswith("eagle"):
++            self._clear_forward_batch_from_layers()
+ 
+     def init_device_graphs(self):
+         """Capture device graphs."""
+@@ -2124,6 +2134,26 @@ class ModelRunner:
+         self.graph_mem_usage = 0
+         # ... (rest of the function)
+ 
++    def _set_forward_batch_to_layers(self, forward_batch):
++        """Set forward_batch to all Linear layers"""
++        for module in self.model.modules():
++            if hasattr(module, 'forward_batch'):
++                module.forward_batch = forward_batch
++
++    def _clear_forward_batch_from_layers(self):
++        """Clear forward_batch from all Linear layers"""
++        for module in self.model.modules():
++            if hasattr(module, 'forward_batch'):
++                module.forward_batch = None
++
+     def _dummy_run(self, batch_size: int, run_ctx=None):
+         """Run a dummy forward pass for warmup/profiling."""
+         if self.is_generation:
