@@ -372,3 +372,114 @@ self.hnorm(forward_batch.spec_info.hidden_states[-1:])
 ```
 
 改完这行代码，你的 TP2 + 3层方案应该就能顺利跑起来了。
+
+
+---
+
+toolName: search_by_regex
+            
+status: success
+          
+query: disable_cuda_graph_padding|SGLANG_ENABLE_SPEC_V2|disable_overlap_schedule
+          
+
+        
+            
+toolName: view_files
+            
+status: success
+          
+            
+filePath: d:\SGlang\sglang-main\python\sglang\srt\server_args.py
+          
+
+        
+            
+toolName: view_files
+            
+status: success
+          
+            
+filePath: d:\SGlang\sglang-main\python\sglang\srt\speculative\eagle_draft_cuda_graph_runner.py
+          
+
+        
+            
+toolName: search_by_regex
+            
+status: success
+          
+query: class EAGLEDraftNpuGraphRunner|EAGLEDraftExtendNpuGraphRunner
+          
+
+        
+            
+toolName: view_files
+            
+status: success
+          
+            
+filePath: d:\SGlang\sglang-main\python\sglang\srt\speculative\eagle_worker_v2.py
+          
+
+        
+            
+toolName: view_files
+            
+status: success
+          
+            
+filePath: d:\SGlang\sglang-main\python\sglang\srt\hardware_backend\npu\graph_runner\eagle_draft_npu_graph_runner.py
+          
+
+        
+            
+toolName: view_files
+            
+status: success
+          
+            
+filePath: d:\SGlang\sglang-main\python\sglang\srt\hardware_backend\npu\graph_runner\eagle_draft_extend_npu_graph_runner.py
+          
+
+        
+            
+toolName: view_files
+            
+status: success
+          
+            
+filePath: d:\SGlang\sglang-main\python\sglang\srt\speculative\eagle_draft_extend_cuda_graph_runner.py
+          
+可以修，而且建议按“**先稳住服务，再修根因**”两步走。
+
+**先稳住（不改代码，最快）**
+- 先把投机降级到 1-step，绕开你现在在 step2/3 才触发的路径：  
+  `--speculative-num-steps 1 --speculative-eagle-topk 1 --speculative-num-draft-tokens 2`
+- 并发先降到很小，避免 batch/padding 放大形状漂移：  
+  `--max-running-requests 1`（最多先试 4）
+- 显式关闭 Spec V2 overlap（你当前是 Ascend，且这是实验路径）：  
+  `export SGLANG_ENABLE_SPEC_V2=0`  
+  或启动参数加 `--disable-overlap-schedule`
+- 如果必须在线先跑，最稳妥是临时关闭 speculative（先保可用）。
+
+**为什么这能止血**
+- 你的崩溃是 KV 写入时 `loc` 和 `k` 的 token 维不一致（1 vs 10），触发点在 [memory_pool_npu.py](file:///d:/SGlang/sglang-main/python/sglang/srt/hardware_backend/npu/memory_pool_npu.py#L331-L335)。
+- step>1 时 draft 循环每轮都会改 `forward_batch.out_cache_loc`，在你这个异常工况下更容易出现“loc按1个token、k却按10个token”的漂移，见 [eagle_worker_v2.py](file:///d:/SGlang/sglang-main/python/sglang/srt/speculative/eagle_worker_v2.py#L414-L449)。
+
+**根因修复（建议改代码）**
+在 Ascend MLA decode 写 KV 前做“按 loc 裁剪 k/k_rope”，把 padding token 丢掉，避免硬崩：
+
+- 位置： [ascend_backend.py](file:///d:/SGlang/sglang-main/python/sglang/srt/hardware_backend/npu/attention/ascend_backend.py#L1697-L1700)
+- 逻辑（伪码）：
+  - `n = forward_batch.out_cache_loc.numel()`
+  - 若 `k.shape[0] != n`：`k = k[:n]`，`k_rope = k_rope[:n]`
+  - 再调用 `set_kv_buffer(...)`
+
+这类裁剪对你这个报错是对症的：因为 `loc` 才是合法写槽位，`k` 多出来通常是 padding 产物。
+
+**额外说明**
+- “TP2 + 只跑三层”不是直接 bug 点，但它让你远离官方验证工况，明显更容易触发 speculative 的边界问题。
+- 你后续如果恢复 8 卡，再把 speculative 参数恢复到 `3/1/4`（文档推荐组合）更合理。
+
+如果你愿意，我可以直接给你一版最小补丁（只改 1~2 处，不改算法），让它先不崩，再加 shape 日志帮你定位上游是谁把 1 放大到 10。
